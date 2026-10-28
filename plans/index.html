@@ -1,0 +1,90 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Driver plans · Ibraluks Rides</title><meta name="robots" content="noindex"><link rel="stylesheet" href="style.css"></head>
+<body><main>
+<header><h1>Ibraluks Rides · Driver plans</h1><button id="signout" class="secondary hidden" style="width:auto">Sign out</button></header>
+<div id="msg" class="err"></div>
+
+<section id="login" class="card hidden">
+  <h2>Driver sign in</h2><p class="muted">Use the same account as the Ibraluks Rides driver app.</p>
+  <input id="email" type="email" placeholder="Email"><input id="password" type="password" placeholder="Password">
+  <button id="emailBtn">Sign in with email</button>
+  <p class="muted" style="text-align:center">or</p>
+  <input id="phone" type="tel" placeholder="Phone (e.g. +1 555 123 4567)"><button id="otpBtn" class="secondary">Text me a code</button>
+  <div id="otpBox" class="hidden"><input id="otp" inputmode="numeric" placeholder="6-digit code"><button id="verifyBtn">Verify code</button></div>
+</section>
+
+<section id="app" class="hidden">
+  <div id="soon" class="banner hidden">Driver plans are coming soon. You can see the plans below, but you can't subscribe yet.</div>
+  <div class="card" id="current"></div>
+  <div class="plans" id="plans"></div>
+  <p class="muted">Plans lower the commission Ibraluks Rides keeps on your fares while your plan is active. Tips are never commissioned.
+    Rider prices are never changed by plans (no surge pricing). Priority dispatch only breaks ties between equally close drivers.
+    Plan changes are prorated. You can cancel any time; your plan stays until the end of the paid period.</p>
+</section>
+</main>
+<script type="module">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.47.10";
+const cfg = window.IBRALUKS_BILLING;
+const sb = createClient(cfg.supabaseUrl, cfg.supabaseKey);
+const $ = (id) => document.getElementById(id);
+const money = (c) => "$" + (c / 100).toFixed(c % 100 ? 2 : 0);
+const show = (id, on) => $(id).classList.toggle("hidden", !on);
+const err = (m) => { $("msg").textContent = m || ""; };
+let phoneE164 = "";
+
+async function call(action, tier_id) {
+  err("");
+  const { data, error } = await sb.functions.invoke("create-driver-plan-checkout", { body: { action, tier_id } });
+  if (error) { let m = error.message; try { m = (await error.context.json()).error || m; } catch {} err(m); return null; }
+  if (!data?.ok) { err(data?.error || "Something went wrong"); return null; }
+  return data;
+}
+
+async function render() {
+  const { data: { session } } = await sb.auth.getSession();
+  show("login", !session); show("app", !!session); show("signout", !!session);
+  if (!session) return;
+  const { data: p, error } = await sb.rpc("my_driver_plan");
+  if (error) return err(error.message);
+  if (!p) { show("app", false); return err("This page is for Ibraluks Rides drivers. Sign in with your driver account."); }
+  show("soon", !p.billing_enabled);
+  const active = p.tier_id && ["active", "trialing", "past_due", "unpaid", "paused"].includes(p.status);
+  const end = p.current_period_end ? new Date(p.current_period_end).toLocaleDateString() : "";
+  $("current").innerHTML = active
+    ? `<h2>Your plan: ${p.tier_name}</h2><p>${money(p.monthly_price_cents)}/month · status <b>${p.status}</b>${end ? ` · ${p.cancel_at_period_end ? "ends" : "renews"} ${end}` : ""}</p>
+       <p class="muted">Commission now: ${p.commission_percent}% (default ${p.default_commission_percent}%).</p>
+       <div style="display:flex;gap:8px;flex-wrap:wrap">
+         ${p.cancel_at_period_end ? `<button id="resume" style="width:auto">Keep my plan</button>` : `<button id="cancel" class="secondary" style="width:auto">Cancel plan</button>`}
+         <button id="portal" class="secondary" style="width:auto">Payment method & invoices</button></div>`
+    : `<h2>No plan</h2><p class="muted">You pay the standard commission: ${p.default_commission_percent}% today.</p>`;
+  $("plans").innerHTML = p.plans.map((t) => {
+    const cur = active && t.id === p.tier_id;
+    const can = p.billing_enabled && t.purchasable && !cur;
+    return `<div class="card plan ${cur ? "current" : ""}"><h3>${t.name}</h3><div class="price">${money(t.monthly_price_cents)}<span class="muted">/mo</span></div>
+      <p>${t.commission_percent}% commission${t.priority_dispatch ? " + priority dispatch (tie-break only)" : ""}</p>
+      ${t.description ? `<p class="muted">${t.description}</p>` : ""}
+      <button data-tier="${t.id}" ${can ? "" : "disabled"}>${cur ? "Current plan" : active ? "Switch to this plan" : "Choose plan"}</button></div>`;
+  }).join("");
+  document.querySelectorAll("button[data-tier]").forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    if (active) {
+      if (!confirm("Switch plans? The price difference is prorated on your next invoice.")) { b.disabled = false; return; }
+      if (await call("change", b.dataset.tier)) await render(); else b.disabled = false;
+    } else {
+      const r = await call("checkout", b.dataset.tier); if (r?.url) location.href = r.url; else b.disabled = false;
+    }
+  });
+  if ($("cancel")) $("cancel").onclick = async () => { if (confirm(`Cancel your plan? It stays active until ${end}.`) && await call("cancel")) render(); };
+  if ($("resume")) $("resume").onclick = async () => { if (await call("resume")) render(); };
+  if ($("portal")) $("portal").onclick = async () => { const r = await call("portal"); if (r?.url) location.href = r.url; };
+}
+
+$("emailBtn").onclick = async () => { err(""); const { error } = await sb.auth.signInWithPassword({ email: $("email").value.trim(), password: $("password").value }); error ? err(error.message) : render(); };
+$("otpBtn").onclick = async () => {
+  err(""); const d = $("phone").value.replace(/\D/g, ""); phoneE164 = d.length === 10 ? "+1" + d : "+" + d;
+  const { error } = await sb.auth.signInWithOtp({ phone: phoneE164, options: { shouldCreateUser: false } }); error ? err(error.message) : show("otpBox", true);
+};
+$("verifyBtn").onclick = async () => { const { error } = await sb.auth.verifyOtp({ phone: phoneE164, token: $("otp").value.replace(/\D/g, ""), type: "sms" }); error ? err(error.message) : render(); };
+$("signout").onclick = async () => { await sb.auth.signOut(); render(); };
+render();
+</script></body></html>
